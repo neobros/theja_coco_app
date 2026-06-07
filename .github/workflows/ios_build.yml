@@ -54,9 +54,7 @@ jobs:
           cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles
 
       - name: Build iOS App
-        # Building an unsigned xcarchive first, then we could export it.
-        # Since we installed the certs into the keychain, flutter build ipa can use them.
-        run: flutter build ipa --release --export-method ad-hoc
+        run: flutter build ipa --release --export-method ad-hoc --code-sign-identity "Apple Distribution"
         
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
