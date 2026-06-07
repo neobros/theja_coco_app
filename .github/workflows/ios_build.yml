@@ -57,6 +57,8 @@ jobs:
           PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" /dev/stdin <<< "$(security cms -D -i $PP_PATH)")
           PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" /dev/stdin <<< "$(security cms -D -i $PP_PATH)")
           TEAM_ID=$(/usr/libexec/PlistBuddy -c "Print :TeamIdentifier:0" /dev/stdin <<< "$(security cms -D -i $PP_PATH)")
+          APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" /dev/stdin <<< "$(security cms -D -i $PP_PATH)")
+          BUNDLE_ID=${APP_ID#*.}
 
           # Find the exact signing identity name from the temporary keychain
           SIGNING_IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep -oE '"[^"]+"' | head -n 1 | tr -d '"')
@@ -64,6 +66,7 @@ jobs:
           echo "Found Profile UUID: $PROFILE_UUID"
           echo "Found Profile Name: $PROFILE_NAME"
           echo "Found Team ID: $TEAM_ID"
+          echo "Found Bundle ID: $BUNDLE_ID"
           echo "Found Signing Identity: $SIGNING_IDENTITY"
 
           # Inject signing settings dynamically into Flutter's Release config
@@ -74,8 +77,48 @@ jobs:
           echo "PROVISIONING_PROFILE_SPECIFIER = $PROFILE_NAME" >> ios/Flutter/Release.xcconfig
           echo "PROVISIONING_PROFILE = $PROFILE_UUID" >> ios/Flutter/Release.xcconfig
 
+          # Detect provisioning profile type for ExportOptions.plist
+          GET_TASK_ALLOW=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:get-task-allow" /dev/stdin <<< "$(security cms -D -i $PP_PATH)")
+          HAS_DEVICES=$(/usr/libexec/PlistBuddy -c "Print :ProvisionedDevices" /dev/stdin 2>/dev/null <<< "$(security cms -D -i $PP_PATH)")
+
+          if [ "$GET_TASK_ALLOW" = "true" ]; then
+            EXPORT_METHOD="development"
+          elif [ -n "$HAS_DEVICES" ]; then
+            EXPORT_METHOD="ad-hoc"
+          else
+            EXPORT_METHOD="app-store"
+          fi
+          echo "Detected Export Method: $EXPORT_METHOD"
+
+          # Dynamically generate ExportOptions.plist for xcodebuild exportArchive phase
+          cat <<EOF > $RUNNER_TEMP/ExportOptions.plist
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>compileBitcode</key>
+  <false/>
+  <key>method</key>
+  <string>$EXPORT_METHOD</string>
+  <key>signingStyle</key>
+  <string>manual</string>
+  <key>stripSwiftSymbols</key>
+  <true/>
+  <key>teamID</key>
+  <string>$TEAM_ID</string>
+  <key>thinning</key>
+  <string>&lt;none&gt;</string>
+  <key>provisioningProfiles</key>
+  <dict>
+    <key>$BUNDLE_ID</key>
+    <string>$PROFILE_NAME</string>
+  </dict>
+</dict>
+</plist>
+EOF
+
       - name: Build iOS App
-        run: flutter build ipa --release --export-method ad-hoc
+        run: flutter build ipa --release --export-options-plist=$RUNNER_TEMP/ExportOptions.plist
         
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
