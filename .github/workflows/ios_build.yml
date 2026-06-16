@@ -1,3 +1,126 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to upload the IPA to (e.g., v1.0.0). Leave empty if pushing a tag.'
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.x'
+          channel: 'stable'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Install Apple Certificate and Provisioning Profile
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.APP_STORE_CERT_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APP_STORE_CERT_PASSWORD }}
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.MOBILEPROVISION_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o $PP_PATH
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychains -d user -s $KEYCHAIN_PATH $(security list-keychains -d user | tr -d '"')
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles
+
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" /dev/stdin <<< "$(security cms -D -i $PP_PATH)")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" /dev/stdin <<< "$(security cms -D -i $PP_PATH)")
+          TEAM_ID=$(/usr/libexec/PlistBuddy -c "Print :TeamIdentifier:0" /dev/stdin <<< "$(security cms -D -i $PP_PATH)")
+          APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" /dev/stdin <<< "$(security cms -D -i $PP_PATH)")
+          BUNDLE_ID=${APP_ID#*.}
+
+          SIGNING_IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep -oE '"[^"]+"' | head -n 1 | tr -d '"')
+
+          echo "Found Profile UUID: $PROFILE_UUID"
+          echo "Found Profile Name: $PROFILE_NAME"
+          echo "Found Team ID: $TEAM_ID"
+          echo "Found Bundle ID: $BUNDLE_ID"
+          echo "Found Signing Identity: $SIGNING_IDENTITY"
+
+          echo "" >> ios/Flutter/Release.xcconfig
+          echo "DEVELOPMENT_TEAM = $TEAM_ID" >> ios/Flutter/Release.xcconfig
+          echo "CODE_SIGN_STYLE = Manual" >> ios/Flutter/Release.xcconfig
+          echo "CODE_SIGN_IDENTITY = $SIGNING_IDENTITY" >> ios/Flutter/Release.xcconfig
+          echo "PROVISIONING_PROFILE_SPECIFIER = $PROFILE_NAME" >> ios/Flutter/Release.xcconfig
+          echo "PROVISIONING_PROFILE = $PROFILE_UUID" >> ios/Flutter/Release.xcconfig
+
+          GET_TASK_ALLOW=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:get-task-allow" /dev/stdin 2>/dev/null <<< "$(security cms -D -i $PP_PATH)" || echo "false")
+          HAS_DEVICES=$(/usr/libexec/PlistBuddy -c "Print :ProvisionedDevices" /dev/stdin 2>/dev/null <<< "$(security cms -D -i $PP_PATH)" || echo "")
+
+          if [ "$GET_TASK_ALLOW" = "true" ]; then
+            EXPORT_METHOD="development"
+          elif [ -n "$HAS_DEVICES" ]; then
+            EXPORT_METHOD="ad-hoc"
+          else
+            EXPORT_METHOD="app-store"
+          fi
+
+          echo "Detected Export Method: $EXPORT_METHOD"
+
+          cat > $RUNNER_TEMP/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>compileBitcode</key>
+            <false/>
+            <key>method</key>
+            <string>$EXPORT_METHOD</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>teamID</key>
+            <string>$TEAM_ID</string>
+            <key>thinning</key>
+            <string>&lt;none&gt;</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>$BUNDLE_ID</key>
+              <string>$PROFILE_NAME</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Build iOS App
+        run: flutter build ipa --release --export-options-plist=$RUNNER_TEMP/ExportOptions.plist
+
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
