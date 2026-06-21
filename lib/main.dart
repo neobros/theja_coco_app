@@ -86,6 +86,8 @@ class _ThejaCocoWebAppState extends State<ThejaCocoWebApp> {
   bool _hasLoadError = false;
   bool _isLoading = true;
   bool _isGoingBack = false;
+  bool _canGoBack = false;
+  double _edgeSwipeDistance = 0;
   int _progress = 0;
   String _currentPageUrl = _homeUrl;
   int _selectedTabIndex = 0;
@@ -132,6 +134,7 @@ class _ThejaCocoWebAppState extends State<ThejaCocoWebApp> {
               _isLoading = false;
               _progress = 100;
             });
+            _refreshNavigationState();
           },
           onUrlChange: (change) {
             final url = change.url;
@@ -140,6 +143,7 @@ class _ThejaCocoWebAppState extends State<ThejaCocoWebApp> {
               _currentPageUrl = url;
               _selectTab(_tabIndexForUrl(url));
             });
+            _refreshNavigationState();
           },
           onWebResourceError: (error) {
             if (!_isMainPageError(error) || !mounted) return;
@@ -168,6 +172,26 @@ class _ThejaCocoWebAppState extends State<ThejaCocoWebApp> {
     if (errorUrl == null || errorUrl.isEmpty) return false;
     return Uri.tryParse(errorUrl)?.replace(fragment: '') ==
         Uri.tryParse(_currentPageUrl)?.replace(fragment: '');
+  }
+
+  bool get _isIos {
+    return !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+  }
+
+  bool get _isHomePage {
+    final uri = Uri.tryParse(_currentPageUrl);
+    if (uri == null || uri.host != Uri.parse(_homeUrl).host) return false;
+    return uri.path.isEmpty || uri.path == '/';
+  }
+
+  bool get _showIosBackButton {
+    return _isIos && _canGoBack && !_isHomePage && !_hasLoadError;
+  }
+
+  Future<void> _refreshNavigationState() async {
+    final canGoBack = await _controller?.canGoBack() ?? false;
+    if (!mounted || canGoBack == _canGoBack) return;
+    setState(() => _canGoBack = canGoBack);
   }
 
   int _tabIndexForUrl(String url) {
@@ -236,9 +260,28 @@ class _ThejaCocoWebAppState extends State<ThejaCocoWebApp> {
         });
       }
       await controller.goBack();
+      await _refreshNavigationState();
       return;
     }
     SystemNavigator.pop();
+  }
+
+  void _startEdgeSwipe(DragStartDetails _) {
+    _edgeSwipeDistance = 0;
+  }
+
+  void _updateEdgeSwipe(DragUpdateDetails details) {
+    if (details.delta.dx > 0) {
+      _edgeSwipeDistance += details.delta.dx;
+    }
+  }
+
+  void _finishEdgeSwipe(DragEndDetails details) {
+    final velocity = details.primaryVelocity ?? 0;
+    if (_showIosBackButton && (_edgeSwipeDistance >= 56 || velocity >= 650)) {
+      _handleBack();
+    }
+    _edgeSwipeDistance = 0;
   }
 
   @override
@@ -265,6 +308,25 @@ class _ThejaCocoWebAppState extends State<ThejaCocoWebApp> {
                 AppLoadingView(progress: _progress),
               if (_supportsWebView && showNativeError)
                 AppNetworkErrorView(onRetry: _reload),
+              if (_showIosBackButton)
+                Positioned(
+                  top: 0,
+                  bottom: 0,
+                  left: 0,
+                  width: 24,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onHorizontalDragStart: _startEdgeSwipe,
+                    onHorizontalDragUpdate: _updateEdgeSwipe,
+                    onHorizontalDragEnd: _finishEdgeSwipe,
+                  ),
+                ),
+              if (_showIosBackButton)
+                Positioned(
+                  top: 92,
+                  left: 12,
+                  child: AppWebViewBackButton(onPressed: _handleBack),
+                ),
             ],
           ),
         ),
@@ -274,6 +336,31 @@ class _ThejaCocoWebAppState extends State<ThejaCocoWebApp> {
                 onDestinationSelected: _openTab,
               )
             : null,
+      ),
+    );
+  }
+}
+
+class AppWebViewBackButton extends StatelessWidget {
+  const AppWebViewBackButton({super.key, required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      shape: const CircleBorder(),
+      elevation: 5,
+      shadowColor: const Color(0x42000000),
+      child: IconButton(
+        onPressed: onPressed,
+        tooltip: 'Back',
+        icon: const Icon(Icons.chevron_left_rounded),
+        color: const Color(0xFF0F7A4A),
+        iconSize: 28,
+        constraints: const BoxConstraints.tightFor(width: 44, height: 44),
+        padding: EdgeInsets.zero,
       ),
     );
   }
